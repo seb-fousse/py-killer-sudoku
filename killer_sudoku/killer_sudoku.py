@@ -1,6 +1,6 @@
-from typing import Iterable, Tuple, Optional, Dict, List
+from typing import Iterable, Tuple, Optional, Union, Mapping
 from copy import deepcopy
-from killer_sudoku.sudoku_data import *
+from killer_sudoku.cage import Cage
 
 """
 KillerSudoku(board, cages, raising=False)
@@ -21,69 +21,17 @@ Strategy:
 - Combination of backtracking and strategies listed here: https://www.sudokuwiki.org/killersudoku.aspx
 """
 
-class Unsolvable(Exception):
+class UnsolvableError(Exception):
   pass
 
-class Cage():
-  def __init__(self, sum: int, cells: Iterable[Tuple[int, int]]):
-    """
-    Initializes a cage for a Killer Sudoku
+class KillerSudoku:
 
-    :param sum: The sum of the values for each cell in the cage
-    :param cells: Iterable containing (i, j) coordinates for each cell in this cage
-
-    :raises ValueError: If there are an invalid number of cells in the cage, if the cage has an invalid sum,
-      if a given cell's coordinates are counted multiples times in the cage, or if a cell in the cage is out of 
-      bounds for a 9x9 Sudoku grid.
-    """
-
-    # Validate inputs
-    if len(cells) < 1 or len(cells) > 9:
-      raise ValueError("Must have 1-9 cells in a cage")
-    cage_sum_min, cage_sum_max = possible_cage_sum_min_max[len(cells)]
-    if sum < cage_sum_min or sum > cage_sum_max:
-      raise ValueError(f"A cage with {len(cells)} cells has a sum in the range [{cage_sum_min}, {cage_sum_max}]")
-    if len(cells) > len(set(cells)):
-      raise ValueError("List of cells provided must have unique values")
-    for cell in cells:
-      if cell[0] < 0 or cell[0] > 8 or cell[1] < 0 or cell[1] > 8:
-        raise ValueError(f"Cell {cell} is out of bounds for a 9x9 puzzle. Coordinates must be in the range [0-8]")
-    
-    self.sum = sum
-    self.cells = cells
-
-  def __repr__(self):
-    return f"<Cage: {{sum: {self.sum}, cells: {self.cells}}}>"
-
-class CageBuilder():
-  def __init__(self, cages_iterable: Optional[Iterable[Dict]] = None):
-    """
-    Initializes a CageBuilder. A CageBuilder transforms a json or iterable into a list of Cages.
-    This is inteded to make setting up the cages for a Killer Sudoku more convenient.
-
-    :param cages_iterable: An iterable where each element is a dict in the format {'sum': n, 'cells':[(i,j)...]}
-    """
-
-    self.cages = []
-    for cage_dict in cages_iterable:
-      self.cages.append(Cage(cage_dict['sum'], [tuple(cell) for cell in cage_dict['cells']]))
-  
-  def add(self, cage: Cage):
-    """
-    Adds a Cage to the list of Cages contained in the CageBuilder
-
-    :param cage: Cage to be added to the CageBuilder
-    """
-    self.cages.add(cage)
-
-
-class KillerSudoku():
   def __init__(self, cages: Iterable[Cage], board: Optional[Iterable[Iterable[int]]] = [[0 for _ in range(0,9)] for _ in range(0,9)]):
     """
     Initializes a Killer Sudoku board
 
-    :param board: Iterable for the initial state of the Killer Sudoku board
-    :param cages: Iterable for the cages for the Killer Sudoku board
+    :param Iterable[Cage] cages: Iterable for the cages for the Killer Sudoku board
+    :param Iterable[Iterable[int]] board: 9x9 list for the initial state of the Killer Sudoku board, defaults to a 9x9 list of 0s
     
     :raises ValueError: If the board size isn't 9x9, if cells are counted in multiple cages, or if cages don't include all 81 cells
     """
@@ -106,13 +54,13 @@ class KillerSudoku():
     if len(unique_cells) != 81:
       raise ValueError("Cages do not contain all 81 cells in the puzzle")
     
+    # TODO: Check that board has values appropriately assigned
+    
     self.board: Iterable[Iterable[int]] = deepcopy(board)
     self.cages: Iterable[Cage] = deepcopy(cages)
     self._rows: Iterable[Cage] = []
     self._columns: Iterable[Cage] = []
     self._subgrids: Iterable[Cage] = []
-
-    self._cage_neighbors = self._get_cage_neighbors_map()
 
     # Add cages for rows
     for i in range(0,9):
@@ -136,16 +84,25 @@ class KillerSudoku():
             subgrids[subgrid_index][i % 3 * 3 + j % 3] = (i, j)
     for subgrid in subgrids:
       self._subgrids.append(Cage(45, subgrid))
+    
+    self._neighbors_map = self._get_neighbors_map()
 
-  def solve(self, raising: Optional[bool] = False) -> 'KillerSudoku':
-    pass
-  
+
+  def solve(self, raising: Optional[bool] = False) -> Union['KillerSudoku', None]:
+    solution = _Solver(self).solve()
+    if solution:
+      return solution
+    elif raising:
+      return UnsolvableError("No solution found")
+    else:
+      return None
+
   def show(self) -> None:
     # Top line
     sep_line = "╔"
     for j in range(8):
       sep_line += "═══"
-      sep_line += "═" if (0, j+1) in self._cage_neighbors[(0,j)] else "╦"
+      sep_line += "═" if (0, j+1) in self._neighbors_map[(0,j)]['cage'] else "╦"
     sep_line += "═══╗"
     print(sep_line)
 
@@ -166,24 +123,24 @@ class KillerSudoku():
       (False, False, True, True) : "╔",
       (False, False, True, False) : " ",
       (False, False, False, True) : " ",
-      (False, False, False, True) : " "
+      (False, False, False, False) : " "
     }
 
     # First 8 rows
     for i in range(0,8):
       cell_line = "║"
-      sep_line = "║" if (i+1, 0) in self._cage_neighbors[(i,0)] else "╠"
+      sep_line = "║" if (i+1, 0) in self._neighbors_map[(i,0)]['cage'] else "╠"
       for j in range(0,9):
         value = ' ' if self.board[i][j] == 0 else self.board[i][j]
-        neighbors = self._cage_neighbors[(i,j)]
+        neighbors = self._neighbors_map[(i,j)]['cage']
         cell_line += f' {value} '
         sep_line += "   " if (i+1, j) in neighbors else "═══"
         cell_line += " " if (i, j+1) in neighbors else "║"
         if j == 8:
           sep_line += "║" if (i+1, j) in neighbors else "╣"
           break
-        right_neighbors = self._cage_neighbors[(i,j+1)]
-        below_neighbors = self._cage_neighbors[(i+1,j)]
+        right_neighbors = self._neighbors_map[(i,j+1)]['cage']
+        below_neighbors = self._neighbors_map[(i+1,j)]['cage']
         sep_up = (i,j+1) not in neighbors
         sep_left = (i+1, j) not in neighbors
         sep_down = (i+1, j+1) not in below_neighbors
@@ -196,19 +153,133 @@ class KillerSudoku():
     cell_line = "║"
     sep_line = "╚"
     for j in range(0,8):
-      neighbors = self._cage_neighbors[(8,j)]
+      neighbors = self._neighbors_map[(8,j)]['cage']
       cell_line += f' {value} '
       cell_line += " " if (8, j+1) in neighbors else "║"
       sep_line += "═══"
-      sep_line += "═" if (8, j+1) in self._cage_neighbors[(8,j)] else "╩"
+      sep_line += "═" if (8, j+1) in self._neighbors_map[(8,j)]['cage'] else "╩"
     cell_line += f' {value} ║'
     sep_line += "═══╝"
     print(cell_line)
     print(sep_line)
 
-  def _get_cage_neighbors_map(self):
-    cage_neighbors_map = {}
+  def _get_neighbors_map(self) -> Mapping[Tuple, Iterable]:
+    neighbors_map = {}
+    for i in range(9):
+      for j in range(9):
+        neighbors_map[(i,j)] = {}
+    for row in self._rows:
+      for cell in row.cells:
+        neighbors_map[cell]['row'] = [c for c in row.cells if c != cell]
+    for column in self._columns:
+      for cell in column.cells:
+        neighbors_map[cell]['column'] = [c for c in column.cells if c != cell]
+    for subgrid in self._subgrids:
+      for cell in subgrid.cells:
+        neighbors_map[cell]['subgrid'] = [c for c in subgrid.cells if c != cell]
     for cage in self.cages:
       for cell in cage.cells:
-        cage_neighbors_map[cell] = [c for c in cage.cells if c != cell]
-    return cage_neighbors_map
+        neighbors_map[cell]['cage'] = [c for c in cage.cells if c != cell]
+    return neighbors_map
+
+class _Solver:
+  def __init__(self, ks: KillerSudoku):
+    self.ks = ks
+    # Initialize empty cells to have domain 1-9
+    self.empty_cell_possibilities = dict()
+    for i in range(9):
+      for j in range(9):
+        if self.ks.board[i][j] == 0:
+          self.empty_cell_possibilities[(i,j)] = {1,2,3,4,5,6,7,8,9}
+    
+  def solve(self) -> Union[Iterable[Iterable[int]], None]:
+    # Decide which possibility reduction strategies to use here
+    # TODO: easy killer combo reduce
+    # TODO: hard killer combo reduce
+    # TODO: constraint reduce
+    # TODO: single innies and outies reduce
+    return #self._recursive_solve(self.board, self.empty_cell_possibilities)
+    
+  def _recursive_solve(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int], Iterable]) -> Union[Iterable[Iterable[int]], None]:
+    while len(empty_cell_possibilities) > 0:
+      if self._impossible(board):
+        return None
+      self._fill_board(board, empty_cell_possibilities)
+      # Apply strategies to reduce empty cell possibilities
+      # TODO: Consider adding more strategies if you can
+      # Maybe use a flag system to skip unnecessary strategies
+      if self._constraint_reduce(board, empty_cell_possibilities):
+        continue
+      if self._last_remaining_reduce():
+        continue
+      if self._conjugate_pair_reduce(): # Naked & hidden pairs
+        continue
+      if self._conjugate_triple_reduce(): # Naked & hidden triples
+        continue
+      if self._pointing_pair_reduce():
+        continue
+      if self._hard_killer_combo_reduce():
+        continue
+
+      # Apply backtrack if strategies couldn't reduce empty cell possibilities
+      
+
+    return board
+
+  def _fill_board(board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> None:
+    set_cells = []
+    for blank_cell, possibilities in empty_cell_possibilities:
+      if len(possibilities) == 1:
+        value_to_set = possibilities.pop()
+        board[blank_cell[0]][blank_cell[1]] = value_to_set
+        set_cells.append(blank_cell)
+    for set_cell in set_cells:
+      empty_cell_possibilities.pop(set_cell)
+
+  def _impossible(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    return False
+  
+  def _constraint_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    Enforce the killer suduko constraints on the given board. Reduce empty cell possibilities. 
+    TODO - Think of more efficient way to do this reduce as it will be the most frequently run
+    maybe? keep track of already filled cells in a separate list
+    """
+    for constraint_list in (self.ks.cages, self.ks._rows, self.ks._columns, self.ks._subgrids):
+      for constraint in constraint_list:
+        pass
+    
+    return False
+  
+  def _last_remaining_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    If a particular value is only possible in one cell in a given row, col, or subgrid. Update the possibility to the last remaining value
+    https://www.sudokuwiki.org/Getting_Started
+    """
+    return False
+
+  def _conjugate_pair_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    https://www.sudokuwiki.org/Naked_Candidates
+    https://www.sudokuwiki.org/Hidden_Candidates
+    """
+    return False
+  
+  def _conjugate_triple_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    https://www.sudokuwiki.org/Naked_Candidates
+    https://www.sudokuwiki.org/Hidden_Candidates
+    """
+    return False
+  
+  def _pointing_pair_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    https://www.sudokuwiki.org/Intersection_Removal
+    """
+    return False
+  
+  def _hard_killer_combo_reduce(self, board: Iterable[Iterable[int]], empty_cell_possibilities: Mapping[Tuple[int, int],Iterable[int]]) -> bool:
+    """
+    https://www.sudokuwiki.org/Killer_Combinations
+    """
+    return False
